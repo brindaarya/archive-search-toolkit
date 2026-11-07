@@ -1,0 +1,33 @@
+MIT License
+
+Copyright (c) 2026 Brinda Arya
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Исключение: каталог skill-ex-ussr-kinship-research/ — это копия стороннего
+проекта (Denis Shiryaev, https://github.com/DenisSergeevitch/ex-ussr-kinship-research),
+которая распространяется на условиях его собственной лицензии MIT:
+skill-ex-ussr-kinship-research/LICENSE. Выше указаны права только на остальные
+файлы набора.
+
+Exception: the skill-ex-ussr-kinship-research/ directory is a copy of a third-party
+project (Denis Shiryaev) and remains under its own MIT license in
+skill-ex-ussr-kinship-research/LICENSE. The notice above covers the rest of the files only.

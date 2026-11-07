@@ -1,0 +1,8 @@
+.DS_Store
+cache/
+_scans/
+_rgb/
+*.part
+results/
+__pycache__/
+*.pyc
