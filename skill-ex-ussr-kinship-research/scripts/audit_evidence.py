@@ -72,7 +72,20 @@ def read_csv(path: Path, required: set[str]) -> tuple[list[dict[str, str]], list
             missing = sorted(required - set(reader.fieldnames))
             if missing:
                 errors.append(f"{path.name}: отсутствуют колонки: {', '.join(missing)}")
-            rows = [{k: (v or "").strip() for k, v in row.items()} for row in reader]
+            rows = []
+            for row in reader:
+                if None in row:
+                    # csv.DictReader складывает лишние поля в ключ None: обычно незакавыченная запятая.
+                    errors.append(f"{path.name}: строка {reader.line_num} содержит больше полей, чем заголовок (незакавыченная запятая?)")
+                    row.pop(None)
+                if any(value is None for value in row.values()):
+                    # Недостающие поля DictReader заполняет None: значения сдвинулись относительно заголовка.
+                    present = sum(value is not None for value in row.values())
+                    errors.append(
+                        f"{path.name}: строка {reader.line_num} содержит меньше полей, чем заголовок "
+                        f"({present} из {len(reader.fieldnames)}): значения могли сдвинуться в чужие колонки"
+                    )
+                rows.append({k: (v or "").strip() for k, v in row.items()})
             return rows, errors
     except OSError as exc:
         return [], [f"{path.name}: ошибка чтения: {exc}"]
@@ -85,10 +98,31 @@ def duplicate_ids(rows: Iterable[dict[str, str]], field: str) -> list[str]:
 
 def artifact_groups(artifact_ids: Iterable[str], artifact_by_id: dict[str, dict[str, str]]) -> set[str]:
     return {
-        artifact_by_id[artifact_id]["independence_group"]
+        artifact_by_id[artifact_id]["independence_group"].strip().casefold()
         for artifact_id in artifact_ids
-        if artifact_id in artifact_by_id and artifact_by_id[artifact_id].get("independence_group", "")
+        if artifact_id in artifact_by_id
+        and artifact_by_id[artifact_id].get("independence_group", "").strip()
     }
+
+
+def has_direct_record(artifact_ids: Iterable[str], artifact_by_id: dict[str, dict[str, str]]) -> bool:
+    """Одна и та же запись должна быть прямой и иметь описанное происхождение.
+
+    Непустое описание и локатор — проверка заполнения, не доказательство
+    подлинности документа или истинности заключения.
+    """
+    for artifact_id in artifact_ids:
+        row = artifact_by_id.get(artifact_id, {})
+        provenance = row.get("provenance_level", "").strip().casefold()
+        if (
+            row.get("directness", "").casefold() == "direct"
+            and row.get("originality", "").casefold()
+            in {"original", "image-of-original", "official-extract"}
+            and provenance not in {"", "unknown", "неизвестно", "не установлено"}
+            and (row.get("source_url_or_path", "").strip() or row.get("archival_reference", "").strip())
+        ):
+            return True
+    return False
 
 
 def id_prefix(value: str) -> str:
@@ -207,8 +241,11 @@ def main() -> int:
     person_ids = {row["person_id"] for row in persons if row.get("person_id")}
 
     for artifact_id, row in artifact_by_id.items():
-        if not row.get("independence_group"):
+        if not row.get("independence_group", "").strip():
             warnings.append(f"{artifact_id}: не указан independence_group")
+        for person_id in split_ids(row.get("person_ids", "")):
+            if person_id not in person_ids:
+                errors.append(f"{artifact_id}: неизвестный person_id {person_id}")
         for claim_id in split_ids(row.get("related_claim_ids", "")):
             if claim_id not in claim_by_id:
                 errors.append(f"{artifact_id}: неизвестный related claim_id {claim_id}")
@@ -217,6 +254,9 @@ def main() -> int:
         status = row.get("status", "")
         if status not in VALID_CLAIM_STATUSES:
             warnings.append(f"{claim_id}: неизвестный статус {status!r}")
+        for person_id in split_ids(row.get("subject_person_ids", "")):
+            if person_id not in person_ids:
+                errors.append(f"{claim_id}: неизвестный subject_person_id {person_id}")
         referenced = split_ids(row.get("artifact_ids", ""))
         contradictory = split_ids(row.get("contradicting_artifact_ids", ""))
         for artifact_id in referenced + contradictory:
@@ -224,10 +264,11 @@ def main() -> int:
                 errors.append(f"{claim_id}: неизвестный artifact_id {artifact_id}")
 
         groups = artifact_groups(referenced, artifact_by_id)
-        for group in sorted(set(split_ids(row.get("supporting_independence_groups", ""))) - groups):
-            errors.append(
-                f"{claim_id}: independence_group {group} заявлен, но ни один из artifact_ids к нему не относится"
-            )
+        for group in sorted(set(split_ids(row.get("supporting_independence_groups", "")))):
+            if group.casefold() not in groups:
+                errors.append(
+                    f"{claim_id}: independence_group {group} заявлен, но ни один из artifact_ids к нему не относится"
+                )
 
         if status in CORROBORATED and len(groups) < 2:
             warnings.append(
@@ -235,31 +276,26 @@ def main() -> int:
             )
         if status in CORROBORATED and not row.get("rationale"):
             warnings.append(f"{claim_id}: для {status} отсутствует rationale")
+        if status in CORROBORATED and contradictory:
+            warnings.append(
+                f"{claim_id}: статус {status}, но указаны противоречащие артефакты; "
+                "проверьте и объясните, разрешён ли существенный конфликт"
+            )
         if status == "single-source" and len(groups) > 1:
             warnings.append(
                 f"{claim_id}: несколько независимых групп, но статус всё ещё single-source; проверьте конфликт/полноту"
             )
-        if status == "strongly-corroborated":
-            direct = any(
-                artifact_by_id[artifact_id].get("directness", "").lower() == "direct"
-                for artifact_id in referenced
-                if artifact_id in artifact_by_id
+        if status == "strongly-corroborated" and not has_direct_record(referenced, artifact_by_id):
+            warnings.append(
+                f"{claim_id}: strongly-corroborated без единой прямой записи "
+                "с указанным происхождением и локатором оригинала, образа или официальной выписки"
             )
-            provenance = any(
-                artifact_by_id[artifact_id].get("originality", "").lower()
-                in {"original", "image-of-original", "official-extract"}
-                for artifact_id in referenced
-                if artifact_id in artifact_by_id
-            )
-            if not direct:
-                warnings.append(f"{claim_id}: strongly-corroborated без прямого артефакта")
-            if not provenance:
-                warnings.append(
-                    f"{claim_id}: strongly-corroborated без оригинала, образа оригинала или официальной выписки"
-                )
 
     for row in relationships:
         relation_id = row.get("relationship_id", "<без ID>")
+        status = row.get("status", "")
+        if status not in VALID_CLAIM_STATUSES:
+            warnings.append(f"{relation_id}: неизвестный статус {status!r}")
         for person_field in ("person_a_id", "person_b_id"):
             person_id = row.get(person_field, "")
             if person_id and person_id not in person_ids:
@@ -275,21 +311,34 @@ def main() -> int:
                 errors.append(f"{relation_id}: неизвестный artifact_id {artifact_id}")
         # Группа засчитывается, только если за ней стоит артефакт: прямой или через claim_ids.
         backing_ids = split_ids(row.get("supporting_artifact_ids", ""))
+        contradictory = set(split_ids(row.get("contradicting_artifact_ids", "")))
         for claim_id in split_ids(row.get("claim_ids", "")):
             if claim_id in claim_by_id:
                 backing_ids += split_ids(claim_by_id[claim_id].get("artifact_ids", ""))
+                contradictory.update(split_ids(claim_by_id[claim_id].get("contradicting_artifact_ids", "")))
         groups = artifact_groups(backing_ids, artifact_by_id)
-        for group in sorted(set(split_ids(row.get("independence_groups", ""))) - groups):
-            errors.append(
-                f"{relation_id}: independence_group {group} заявлен, но ни один из артефактов связи к нему не относится"
-            )
-        if row.get("status", "") in CORROBORATED:
+        for group in sorted(set(split_ids(row.get("independence_groups", "")))):
+            if group.casefold() not in groups:
+                errors.append(
+                    f"{relation_id}: independence_group {group} заявлен, но ни один из артефактов связи к нему не относится"
+                )
+        if status in CORROBORATED:
             if len(groups) < 2:
                 warnings.append(
                     f"{relation_id}: статус {row.get('status')}, но указано независимых групп: {len(groups)}"
                 )
             if not row.get("rationale"):
                 warnings.append(f"{relation_id}: отсутствует rationale")
+            if contradictory:
+                warnings.append(
+                    f"{relation_id}: статус {status}, но указаны противоречащие артефакты; "
+                    "проверьте и объясните, разрешён ли существенный конфликт"
+                )
+        if status == "strongly-corroborated" and not has_direct_record(backing_ids, artifact_by_id):
+            warnings.append(
+                f"{relation_id}: strongly-corroborated без единой прямой записи "
+                "с указанным происхождением и локатором оригинала, образа или официальной выписки"
+            )
 
     # Итоговый отчёт: ссылки и статусы должны совпадать с реестрами.
     markers: dict[str, int] = {}
@@ -313,10 +362,29 @@ def main() -> int:
             for row in relationships
             if row.get("relationship_id")
         )
-        report_errors, markers = audit_report(
-            report.read_text(encoding="utf-8-sig"), known_ids, statuses
-        )
+        report_text = report.read_text(encoding="utf-8-sig")
+        report_errors, markers = audit_report(report_text, known_ids, statuses)
         errors.extend(report_errors)
+
+    # Журнал поисков необязателен; находка без артефакта — предупреждение.
+    search_rows: list[dict[str, str]] = []
+    search_log = case_dir / "search-log.csv"
+    if search_log.is_file():
+        search_rows, search_errors = read_csv(search_log, {"search_id", "result_status", "artifact_ids"})
+        warnings.extend(search_errors)
+        for row in search_rows:
+            for artifact_id in split_ids(row.get("artifact_ids", "")):
+                if artifact_id not in artifact_by_id:
+                    warnings.append(
+                        f"{row.get('search_id') or '<без ID>'}: неизвестный artifact_id {artifact_id} в журнале поиска"
+                    )
+            if row.get("result_status", "").strip().casefold() == "found" and not row.get(
+                "artifact_ids", ""
+            ).strip():
+                warnings.append(
+                    f"{row.get('search_id') or '<без ID>'}: result_status=found, но artifact_ids пуст — "
+                    "находка не зарегистрирована как артефакт"
+                )
 
     # Сводка готовности: что ещё не снято. Не ошибки — для решения, выдавать ли отчёт.
     summary = {
@@ -334,6 +402,7 @@ def main() -> int:
             "artifacts": len(artifacts),
             "claims": len(claims),
             "relationships": len(relationships),
+            "searches": len(search_rows),
         },
         "summary": summary,
         "errors": errors,
@@ -347,7 +416,7 @@ def main() -> int:
         print(
             "Записей: "
             f"лица={len(persons)}, артефакты={len(artifacts)}, "
-            f"утверждения={len(claims)}, связи={len(relationships)}"
+            f"утверждения={len(claims)}, связи={len(relationships)}, поиски={len(search_rows)}"
         )
         open_statuses = ("hypothesis", "single-source", "unresolved", "contradicted", "пусто")
         print("\nСВОДКА:")
@@ -377,4 +446,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from research_common import configure_utf8_stdio
+
+    configure_utf8_stdio()
     raise SystemExit(main())
